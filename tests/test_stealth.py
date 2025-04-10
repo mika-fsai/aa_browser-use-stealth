@@ -5,11 +5,34 @@ import aiohttp
 from aiofiles import open as aio_open
 import os
 import asyncio
-from browser_use import Agent, Browser
+from browser_use import Agent, Browser, BrowserConfig, BrowserContextConfig
+from browser_use.browser.browser import ProxySettings
 from playwright.async_api import async_playwright
+import random
 
 load_dotenv()
 
+
+user_agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.1 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.96 Safari/537.36",
+]
+
+# proxies = [
+# ]
+
+# random_proxy = random.choice(proxies)
+# proxy_settings = ProxySettings(server=random_proxy)
+
+random_user_agent = random.choice(user_agents)
+context_config = BrowserContextConfig(user_agent=random_user_agent)
+
+config = BrowserConfig(
+    headless=False,
+    disable_security=False,
+    # proxy=proxy_settings,
+)
 def return_task(company_name):
     task = """
     ### Prompt for returning the link to a PDF file
@@ -60,10 +83,75 @@ def return_task(company_name):
     **Important:** Ensure efficiency and accuracy throughout the process.""".format(company_name)
     return task
 
+def get_filename_from_url(url):
+    """Extract filename from URL while handling URL encoding."""
+    path = unquote(urlsplit(url).path)
+    filename = os.path.basename(path) or "downloaded_file.pdf"
+    # Ensure the filename ends with .pdf
+    if not filename.lower().endswith(".pdf"):
+        filename += ".pdf"
+    return filename
+
+
 def get_referer(url):
     """Return the referer (base URL) for a given URL."""
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}"
+
+async def intercept_download_url(target_url):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=["--disable-http2"])
+        # added ignore_https_errors=True to bypass protocol issues
+        context = await browser.new_context(accept_downloads=True, ignore_https_errors=True)
+        page = await context.new_page()
+
+        download_future = asyncio.Future()
+
+        # Listen for the download event
+        page.on("download", lambda download: download_future.set_result(download.url))
+        try:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
+        except Exception as e:
+            print("Error in page.goto:", e)
+            await browser.close()
+            return None
+
+        try:
+            download_url = await asyncio.wait_for(download_future, timeout=10)
+        except asyncio.TimeoutError:
+            download_url = None
+
+        await browser.close()
+        return download_url
+
+
+async def download_pdf(url, save_dir="."):
+    filename = get_filename_from_url(url)
+    save_path = os.path.join(save_dir, filename)
+    
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/115.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": get_referer(url) 
+    }
+    
+    print("Initiating download from:", url)
+    async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as session:
+        async with session.get(url) as response:
+            print("Response status:", response.status)
+            if response.status == 200:
+                async with aio_open(save_path, 'wb') as f:
+                    # Stream the response in chunks to avoid blocking
+                    async for chunk in response.content.iter_chunked(1024):
+                        await f.write(chunk)
+                return save_path
+            raise Exception(f"Link fetch failed: {response.status}")
+
 
 # task = return_task("Moody's Analytics Inc")
 # task = return_task("Billibilli")
@@ -73,9 +161,9 @@ def get_referer(url):
 # task = return_task("Xero")
 # task = return_task("ICBC")
 # task = return_task("Sinopec")
-# task = return_task("Volkswagen")
+task = return_task("Volkswagen")
 # task = return_task("ADNOC")
-task = return_task("Tata group")
+# task = return_task("Tata group")
 
 # task = return_task("Saudi aramco")
 
@@ -121,8 +209,28 @@ async def main():
 
     final_url = extracted_url
 
-    print(final_url)
-    await browser.close()
+    # If the URL already looks like a direct PDF link, skip interception
+    if extracted_url.lower().endswith(".pdf"):
+        print("Direct PDF link detected; skipping intercept.")
+    else:
+        try:
+            intercepted_url = await intercept_download_url(extracted_url)
+            if intercepted_url:
+                final_url = intercepted_url
+                print("Intercepted download URL found. Using it:", intercepted_url)
+            else:
+                print("No intercept download URL found, using extracted URL.")
+        except Exception as e:
+            print("Error while intercepting download URL:", e)
+            # Fallback to the extracted URL if interception fails.
+
+    try:
+        saved_path = await download_pdf(final_url, save_dir=save_dir)
+        print(f"PDF saved as: {saved_path}")
+    except Exception as e:
+        print("Error during PDF download:", e)
+    finally:
+        await browser.close()
 
 if __name__ == '__main__':
 	asyncio.run(main())

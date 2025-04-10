@@ -188,3 +188,6 @@ gcp-login.json
 *.jsonl
 
 uv.lock
+
+pdf/
+*.pdf
