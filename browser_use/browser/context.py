@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from playwright._impl._errors import TimeoutError
+from playwright_stealth import stealth_async
 from playwright.async_api import Browser as PlaywrightBrowser
 from playwright.async_api import (
 	BrowserContext as PlaywrightBrowserContext,
@@ -367,9 +368,11 @@ class BrowserContext:
 			):
 				active_page = pages[0]
 				logger.debug('🔍  Using existing page: %s', active_page.url)
+				await stealth_async(active_page)
 			else:
 				active_page = await context.new_page()
 				await active_page.goto('about:blank')
+				await stealth_async(active_page)
 				logger.debug('🆕  Created new page: %s', active_page.url)
 
 			# Get target ID for the active page
@@ -506,6 +509,15 @@ class BrowserContext:
             })();
             """
 		)
+
+		original_new_page = context.new_page
+
+		async def stealth_new_page(*args, **kwargs):
+			page = await original_new_page(*args, **kwargs)
+			await stealth_async(page)
+			return page
+
+		context.new_page = stealth_new_page
 
 		return context
 
@@ -1457,7 +1469,7 @@ class BrowserContext:
 
 		session = await self.get_session()
 		new_page = await session.context.new_page()
-
+		await stealth_async(new_page)
 		self.active_tab = new_page
 
 		await new_page.wait_for_load_state()
